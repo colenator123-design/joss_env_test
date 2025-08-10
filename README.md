@@ -1,100 +1,66 @@
-![python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
-[![License: GPLv3](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/ai-for-decision-making-tue/Job_Shop_Scheduling_Benchmark_Environments_and_Instances/blob/main/LICENSE)
+# 第二階段：預防性維護排程優化 (Stage II: Preventive Maintenance Scheduling)
 
-## Job Shop Scheduling Benchmark: Environments and Instances for Learning and Non-learning Methods
+## 1. 總覽 (Overview)
 
-### 📖 Overview:
-This repository provides a comprehensive benchmarking environment for a variety of machine scheduling problems, including Job Shop Scheduling (JSP), Flow Shop Scheduling (FSP), Flexible Job Shop Scheduling (FJSP), FJSP with Assembly constraints (FAJSP), FJSP with Sequence-Dependent Setup Times (FJSP-SDST), and the online FJSP (with online job arrivals). It aims to be a centralized hub for researchers, practitioners, and enthusiasts interested in tackling machine scheduling challenges.
+本目錄 (`second_stage_cp`) 包含用於解決「聯合生產與預防性維護排程」問題的第二階段優化程式碼。
 
-### 🛠 Solution Methods:
-The repository includes exact, heuristic and learning based solution methods, each compatible with one or more machine scheduline problem variants:
+在第一階段（假設已完成）產生一個固定的生產排程後，本階段的核心目標是：**在不嚴重影響生產效率的前提下，為每台機器智能地插入預防性維護 (Preventive Maintenance, PM) 活動，以最小化系統的總運營成本。**
 
-| Solution methods | Type | JSP | FSP | FJSP | SDST | AJSP | Dynamic JSP |
-| :----: | :---:| :---:| :---: | :---: | :---: | :---: | :---: |
-| MILP | Exact | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | 
-| CP-SAT | Exact | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
-| Dispatching Rules | Heuristic | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Genetic Algorithm | Heuristic |✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
-| L2D | DRL |✓ | ✓ | ✗ | ✗ | ✗ | |
-| FJSP-DRL | DRL | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ |
-| DANIEL | DRL | ✓ | ✓ | ✓ | ✗ | ✗ | |  
+這個總運營成本主要由以下三部分構成：
+1.  **預防性維護成本 (PM Cost)**：執行計畫性保養活動的直接成本。
+2.  **預期故障成本 (Expected Failure Cost)**：因機器老化、損耗而導致的潛在故障風險所帶來的預期損失。
+3.  **生產效率成本 (Makespan Cost)**：因插入維護活動可能導致的總完工時間 (Makespan) 延長所帶來的成本。
 
-### 🚀 How to use:
+本專案的實現嚴格遵循了學術論文 `safety.pdf` 中提出的確定性優化模型。
 
-Here we provide some short examples on how to use the solution methods in this repository. For more detailed information and more examples, please refer to the tutorials [here][2] and [here][3].
+## 2. 核心模型：基於風險的成本決策
 
-1. **Dispatching Rules:**
+本專案的理論核心是**將未來的隨機故障風險轉化為當前可計算的確定性成本**。我們不模擬機器是否「真的」在某個隨機時刻壞掉，而是採用一種基於風險管理的成本決策方法。
 
-  ```python
+### 2.1. 預期故障成本的計算
 
-from solution_methods.L2D import run_dispatching_rules
-from solution_methods.helper_functions import load_job_shop_env, load_parameters
+預期故障成本的計算基於**可靠性工程**中的 **Weibull 分布模型**。其計算邏輯如下：
 
-parameters = load_parameters("configs/dispatching_rules.toml")
-jobShopEnv = load_job_shop_env(parameters['instance'].get('problem_instance'))
+1.  **故障率函數 `λ(t)`**：我們為每台機器定義一個故障率函數 `λ(t)`，它描述了機器在時刻 `t` 的瞬時故障風險。這個函數不僅與運行時間 `t` 有關，還動態地考慮了機器的**利用率**和**工件切換頻率**等實際工況，使其更貼近真實場景。
 
-makespan, jobShopEnv = run_dispatching_rules(jobShopEnv, **parameters)
-  ```
+2.  **累積風險積分**：在任意時間段 `[t_start, t_end]` 內，機器的預期故障次數（即總累積風險）可以透過對故障率函數 `λ(t)` 進行定積分來計算：
+    `預期故障次數 ≈ ∫[t_start, t_end] λ(t) dt`
 
-2. **Genetic Algorithm:**  
-  ```python
-  from solution_methods.helper_functions import load_job_shop_env, load_parameters
-  from solution_methods.GA.run_GA import run_GA
-  from solution_methods.GA.src.initialization import initialize_run
-  
-  parameters = load_parameters("configs/genetic_algorithm.toml")
-  jobShopEnv = load_job_shop_env(parameters['instance'].get('problem_instance'))
+3.  **成本轉化**：將計算出的預期故障次數乘以單次故障的平均維修成本 `Cf_k`，即可得到這段時間內的**預期故障成本**。
 
-  population, toolbox, stats, hof = initialize_run(jobShopEnv, **parameters)
-  makespan, jobShopEnv = run_GA(jobShopEnv, population, toolbox, stats, hof, **parameters)  
+### 2.2. PM 的作用
+
+預防性維護 (PM) 的作用是將機器的健康狀態恢復到「宛如新生 (As good as new)」。在模型中，一旦對某台機器執行了 PM，這台機器的運行時間 `t` 將被**重置為 0**，其故障率 `λ(t)` 也隨之回到初始的最低點，從而極大地降低了未來的預期故障成本。
+
+## 3. 程式碼結構 (Code Structure)
+
+*   **`ga_10*5.py`**:
+    *   **功能**: 使用**遺傳演算法 (Genetic Algorithm, GA)** 作為核心優化器，來尋找最佳的 PM 開始時間組合。
+    *   **核心函數**:
+        *   `generate_random_job_shop_schedule()`: 生成一個隨機的 10x5 生產排程用於測試。
+        *   `generate_random_params()`: 為機器生成隨機的動態參數和成本參數。
+        *   `get_failure_rate_integral()`: **【模型核心】** 實現了上一節提到的累積風險積分計算。
+        *   `evaluate_schedule_revised()`: **【優化目標】** DEAP 庫的適應度函數。它接收一個 PM 排程方案（`individual`），並根據上述的成本模型計算其總成本和總完工時間。
+    *   **備註**: 這是本目錄下功能最全面的主執行文件。
+
+*   **`ga_solver.py`**:
+    *   **功能**: 與 `ga_10*5.py` 類似，但使用的是一組固定的、預定義的生產排程和參數，更適用於對特定場景進行分析。
+
+*   **`cp.py`**:
+    *   **功能**: 提供了另一種求解思路，使用 Google 的 **OR-Tools CP-SAT 求解器**來解決此問題。
+    *   **對比**: 與 GA 的啟發式搜索不同，CP-SAT 是一個約束規劃求解器，在問題規模較小時可能找到最佳解。這可以作為與 GA 結果對比的一個基準。
+
+## 4. 如何運行 (How to Run)
+
+您可以直接運行主文件 `ga_10*5.py` 來啟動遺傳演算法進行優化。
+
+```bash
+python second_stage_cp/ga_10*5.py
 ```
 
-3. **L2D (DRL-based):**
-  ```python
-  from solution_methods.L2D.src.run_L2D import run_L2D
-  from solution_methods.helper_functions import load_job_shop_env, load_parameters
-   
-  parameters = load_parameters("configs/L2D.toml")
-  jobShopEnv = load_job_shop_env(parameters['instance'].get('problem_instance'))
-  makespan, jobShopEnv = run_L2D(jobShopEnv, **parameters)
-  ```
-
-### 🖼️ Plotting:
-We provide plotting functions to draw both the precedence relations  between operationsand the Gantt chart for the job shop scheduling problems:
-
-
-| ![Precedence Constraints](assets/images/precedence_constraints.PNG) | ![Gantt Chart](assets/images/gantt_chart.PNG) |
-|---------------------------------------------------------------------|------------------------------------------------|
-
-
-### 🏗️ Repository Structure
-The repository is structured to provide ease of use and flexibility:
-- **Configs**: Contains the configuration files for the solution methods.
-- **Data**: Contains the problem instances for benchmarking for different problem variants and data parsers for configuring the benchmarking instances in the scheduling environment.
-- **Visualization**: Contains the plotting functions for visualizing the results.
-- **Scheduling Environment**: Defines the core environment components (`job`, `operation`, `machine`, and `jobShop`). Also contains the `simulationEnv` for dynamic scheduling problems with online job arrivals.
-- **Solution Methods**: Contains the solution methods, including exact, heuristic, and learning-based approaches.
-
-
-### 📄 Reference
-For more detailed information, please refer to our paper. If you use this repository in your research, please consider citing the following paper:
-
-> Reijnen, R., van Straaten, K., Bukhsh, Z., & Zhang, Y. (2023). 
-> Job Shop Scheduling Benchmark: Environments and Instances for Learning and Non-learning Methods. 
-> arXiv preprint arXiv:2308.12794.
-> https://doi.org/10.48550/arXiv.2308.12794
-
-Or, using the following BibTeX entry:
-```bibtex
-@article{reijnen2023job,
-  title={Job Shop Scheduling Benchmark: Environments and Instances for Learning and Non-learning Methods},
-  author={Reijnen, Robbert and van Straaten, Kjell and Bukhsh, Zaharah and Zhang, Yingqian},
-  journal={arXiv preprint arXiv:2308.12794},
-  year={2023}
-}
-```
-A preprint of this paper is available or [arXiv][1]. Please note that this version is a placeholder, and will be updated shortely with the final version.
-
-[1]: https://arxiv.org/abs/2308.12794
-[2]: https://github.com/ai-for-decision-making-tue/Job_Shop_Scheduling_Benchmark_Environments_and_Instances/blob/main/tutorial_benchmark_environment.ipynb
-[3]: https://github.com/ai-for-decision-making-tue/Job_Shop_Scheduling_Benchmark_Environments_and_Instances/blob/main/tutorial_custom_problem_instance.ipynb# joss_env_test
+程式將執行以下步驟：
+1.  生成一個隨機的 10 工件 x 5 機器的生產排程和相關參數。
+2.  初始化遺傳演算法的族群。
+3.  開始迭代優化，每一代都會輸出當前的最佳成本。
+4.  優化結束後，將打印出找到的最佳 PM 排程方案、最低總成本和最終的完工時間。
+5.  如果問題規模不大，還會生成一張包含生產排程和 PM 活動的甘特圖 `gantt_with_pm_ga.png`。
